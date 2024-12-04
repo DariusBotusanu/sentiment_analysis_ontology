@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "ontologysentimentanalysis"
+version = "0.1.0"
+description = ""
+authors = ["Darius Botusanu <botusanu.darius31@outlook.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+huggingface = "^0.0.1"
+torch = "^2.5.1"
+pandas = "^2.2.3"
+transformers = "^4.46.3"
+datasets = "^3.1.0"
+scikit-learn = "^1.5.2"
+tqdm = "^4.67.1"
+pathlib = "^1.0.1"
+rdflib = "^7.1.1"
+owlready2 = "^0.47"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
