@@ -1,65 +1,69 @@
 from pathlib import Path
 import sys
+import os
 
 parent_dir = Path(__file__).parent.parent
 sys.path.append(str(parent_dir))
 
 import pandas as pd
-from sklearn.metrics import classification_report
-from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.metrics import classification_report, confusion_matrix
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 from torch.optim import AdamW
 import torch
 
 from data.data_handling import create_dataloaders, get_tokenizer
-
 from tqdm import tqdm
+from torch.nn import CrossEntropyLoss
 
-NUM_EPOCHS = 10
+NUM_EPOCHS = 1
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 tokenizer = get_tokenizer()
 train_dataloader, test_dataloader = create_dataloaders(tokenizer=tokenizer)
 
 
-def train_bert_model():
-    # Load BERT model for classification
-    model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=3)
+def train_bert_model(epochs=1):
+    model = DistilBertForSequenceClassification.from_pretrained("distilbert-base-uncased", num_labels=3)
+    optimizer = AdamW(model.parameters(), lr=1e-1, weight_decay=1e-2)
 
-    # Optimizer
-    optimizer = AdamW(model.parameters(), lr=5e-4)
-
-    ## Scheduler
-    #num_training_steps = len(train_dataloader) * NUM_EPOCHS
-    #lr_scheduler = get_scheduler(
-    #    "linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
-    #)
+    loss_fn = CrossEntropyLoss()
 
     model.to(device)
 
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0
+
         for batch in tqdm(train_dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
-            loss = outputs.loss
-            loss.backward()
+            loss = loss_fn(outputs.logits, batch["labels"])
 
+            train_loss += loss.item()
+            loss.backward()
             optimizer.step()
-            #lr_scheduler.step()
             optimizer.zero_grad()
 
-        print(f"Epoch {epoch + 1} complete! Loss: {loss.item()}")
+        avg_train_loss = train_loss / len(train_dataloader)
+        print(f"Epoch {epoch + 1} Training Loss: {avg_train_loss:.4f}")
+
+        # Check predictions per class
+        with torch.no_grad():
+            predictions = torch.argmax(outputs.logits, dim=-1)
+            print(f"Epoch {epoch + 1} Class Distribution: {torch.bincount(predictions)}")
 
     return model
 
 def save_model(model, tokenizer, save_dir="./fine_tuned_bert_financial_phrasebank"):
+    os.makedirs(save_dir, exist_ok=True)
     model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
     print(f"Model and tokenizer saved to {save_dir}")
 
 def load_model_and_tokenizer(load_dir="./fine_tuned_bert_financial_phrasebank"):
-    model = BertForSequenceClassification.from_pretrained(load_dir)
+    model = DistilBertForSequenceClassification.from_pretrained(load_dir)
 
     # Load the tokenizer
-    tokenizer = BertTokenizer.from_pretrained(load_dir)
+    tokenizer = DistilBertTokenizer.from_pretrained(load_dir)
 
     print(f"Model and tokenizer loaded from {load_dir}")
     return model, tokenizer
@@ -69,6 +73,7 @@ def eval_model(model, model_name='BERT'):
     model.eval()
     predictions, true_labels = [], []
 
+    # Collect predictions and true labels
     with torch.no_grad():
         for batch in test_dataloader:
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -77,82 +82,22 @@ def eval_model(model, model_name='BERT'):
             predictions.extend(torch.argmax(logits, dim=-1).cpu().numpy())
             true_labels.extend(batch["labels"].cpu().numpy())
 
-
-    # Generate the classification report
-    report = classification_report(
-        true_labels,
-        predictions,
-        target_names={2:'positive', 1:'neutral', 0:'negative'},
-        output_dict=True
+    # Generate confusion matrix
+    cm = confusion_matrix(true_labels, predictions)
+    cm_df = pd.DataFrame(
+        cm,
+        index=[f'Actual {i}' for i in range(len(cm))],
+        columns=[f'Predicted {i}' for i in range(len(cm))]
     )
 
-    # Convert to DataFrame
-    report_df = pd.DataFrame(report).transpose()
-
-    # Save to CSV
-    report_df.to_csv(f'./{model_name}/classification_report.csv')
-
-    print(f"Evaluation report saved to ./{model_name}/classification_report.csv")
-
-
-def infer_with_model(sentences, model_dir="./fine_tuned_bert_financial_phrasebank"):
-    # Load the model and tokenizer
-    loaded_model = BertForSequenceClassification.from_pretrained(model_dir)
-    loaded_tokenizer = BertTokenizer.from_pretrained(model_dir)
-
-    loaded_model.to(device)
-
-    # Prepare predictions list
-    predictions = []
-
-    # Perform inference on each sentence
-    loaded_model.eval()
-    with torch.no_grad():
-        for text in sentences:
-            # Tokenize the sentence
-            inputs = loaded_tokenizer(
-                text,
-                return_tensors="pt",
-                truncation=True,
-                padding=True,
-                max_length=128
-            ).to(device)
-
-            # Get model outputs
-            outputs = loaded_model(**inputs)
-            logits = outputs.logits
-
-            # Get predicted class
-            predicted_class = torch.argmax(logits, dim=-1).cpu().item()
-
-            # Store prediction with original text
-            predictions.append({
-                'text': text,
-                'predicted_class': predicted_class
-            })
-
-    return predictions
+    # Save confusion matrix as CSV
+    cm_df.to_csv(f'./{model_name}/confusion_matrix.csv')
 
 
 if __name__=='__main__':
-    model = train_bert_model()
+    model = train_bert_model(epochs=NUM_EPOCHS)
     save_model(model, tokenizer, save_dir = "./fine_tuned_bert_financial_phrasebank")
     model, tokenizer = load_model_and_tokenizer("./fine_tuned_bert_financial_phrasebank")
     eval_model(model, model_name="BERT")
-
-    # Example usage
-    sentences = [
-        "The company reported significant growth in Q3 earnings.",
-        "Stocks declined sharply in morning trading.",
-        "Investors remain optimistic about the market trends."
-    ]
-
-    results = infer_with_model(sentences)
-
-    # Print results
-    for result in results:
-        print(f"Text: {result['text']}")
-        print(f"Predicted Class: {result['predicted_class']}")
-        print("---")
 
 
